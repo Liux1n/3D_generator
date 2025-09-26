@@ -1,6 +1,11 @@
 # 3D_generator
 
 ## Installation
+
+Create environment by
+```
+conda env create -f environment.yml
+```
 Update setuptools by
 ```
 pip install --upgrade setuptools
