@@ -22,6 +22,15 @@ if torch.cuda.is_available():
 else:
     device = "cpu"
 
+model = TSR.from_pretrained(
+    "stabilityai/TripoSR",
+    config_name="config.yaml",
+    weight_name="model.ckpt",
+)
+
+# adjust the chunk size to balance between speed and memory usage
+model.renderer.set_chunk_size(8192)
+model.to(device)
 
 rembg_session = rembg.new_session()
 
@@ -49,6 +58,23 @@ def preprocess(input_image, do_remove_background, foreground_ratio):
             image = fill_background(image)
     return image
 
+
+def generate(image, mc_resolution, formats=["obj", "glb"]):
+    scene_codes = model(image, device=device)
+    mesh = model.extract_mesh(scene_codes, True, resolution=mc_resolution)[0]
+    mesh = to_gradio_3d_orientation(mesh)
+    rv = []
+    for format in formats:
+        mesh_path = tempfile.NamedTemporaryFile(suffix=f".{format}", delete=False)
+        mesh.export(mesh_path.name)
+        rv.append(mesh_path.name)
+    return rv
+
+
+def run_example(image_pil):
+    preprocessed = preprocess(image_pil, False, 0.9)
+    mesh_name_obj, mesh_name_glb = generate(preprocessed, 256, ["obj", "glb"])
+    return preprocessed, mesh_name_obj, mesh_name_glb
 
 
 with gr.Blocks(title="TripoSR") as interface:
@@ -109,6 +135,38 @@ with gr.Blocks(title="TripoSR") as interface:
                 )
                 gr.Markdown("Note: The model shown here has a darker appearance. Download to get correct results.")
     with gr.Row(variant="panel"):
+        gr.Examples(
+            examples=[
+                "examples/hamburger.png",
+                "examples/poly_fox.png",
+                "examples/robot.png",
+                "examples/teapot.png",
+                "examples/tiger_girl.png",
+                "examples/horse.png",
+                "examples/flamingo.png",
+                "examples/unicorn.png",
+                "examples/chair.png",
+                "examples/iso_house.png",
+                "examples/marble.png",
+                "examples/police_woman.png",
+                "examples/captured.jpeg",
+            ],
+            inputs=[input_image],
+            outputs=[processed_image, output_model_obj, output_model_glb],
+            cache_examples=False,
+            fn=partial(run_example),
+            label="Examples",
+            examples_per_page=20,
+        )
+    submit.click(fn=check_input_image, inputs=[input_image]).success(
+        fn=preprocess,
+        inputs=[input_image, do_remove_background, foreground_ratio],
+        outputs=[processed_image],
+    ).success(
+        fn=generate,
+        inputs=[processed_image, mc_resolution],
+        outputs=[output_model_obj, output_model_glb],
+    )
 
 
 
