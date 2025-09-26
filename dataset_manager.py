@@ -4,15 +4,15 @@ import shutil
 
 def save_to_dataset(input_image, edition_text, preprocessed_image, model_paths, root_dir="dataset"):
     """
-    保存输入、描述、预处理图像、生成模型到 dataset 数据库中
-    参数:
-        input_image: PIL.Image 输入原图
-        edition_text: str 用户输入描述
-        preprocessed_image: PIL.Image 预处理图
-        model_paths: list[str] 模型路径 (obj, glb)
-        root_dir: 数据库根目录
-    返回:
-        save_dir: 存储的文件夹路径
+    Saves the input, description, preprocessed image, and generated model to the dataset database.
+    Parameters:
+    input_image: PIL.Image (original input image)
+    edition_text: str (user input description)
+    preprocessed_image: PIL.Image (preprocessed image)
+    model_paths: list[str] (model paths (obj, glb))
+    root_dir: Database root directory
+    Returns:
+    save_dir: Path to the saved folder
     """
     # 1. generate unique ID for inout image
     unique_id = str(uuid.uuid4())[:8]
