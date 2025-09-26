@@ -12,6 +12,8 @@ from functools import partial
 
 from tsr.system import TSR
 from tsr.utils import remove_background, resize_foreground, to_gradio_3d_orientation
+# [MODIFIED] dataset setting
+from dataset_manager import save_to_dataset
 
 import argparse
 
@@ -121,6 +123,12 @@ with gr.Blocks(title="TripoSR") as interface:
                     )
             with gr.Row():
                 submit = gr.Button("Generate", elem_id="generate", variant="primary")
+                # [MODIFIED] add an edition input block
+                edition_text=gr.Texbox(
+                    label="Edition Description",
+                    placehodel="Please input your Description of the picture."
+                )
+                # [MODIFIED] add an edition input block
         with gr.Column():
             with gr.Tab("OBJ"):
                 output_model_obj = gr.Model3D(
@@ -166,7 +174,15 @@ with gr.Blocks(title="TripoSR") as interface:
         fn=generate,
         inputs=[processed_image, mc_resolution],
         outputs=[output_model_obj, output_model_glb],
+    ).success(
+        # [MODIFIED] save all data to dataset
+        fn=lambda processed, obj, glb, inp, edition: save_to_dataset(
+            inp, edition, processed, [obj, glb]
+        ),
+        inputs=[processed_image, output_model_obj, output_model_glb, input_image, edition_text],
+        outputs=[],
     )
+        # [MODIFIED] save all data to dataset
 
 
 
