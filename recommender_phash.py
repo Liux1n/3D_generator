@@ -25,7 +25,7 @@ class PhashRecommender:
         print("Loading dataset pHash values...")
         for item_id in os.listdir(self.dataset_path):
             item_dir = os.path.join(self.dataset_path, item_id)
-            preprocess_path = os.path.join(item_dir, "preprocess.jpg")
+            preprocess_path = os.path.join(item_dir, "preprocessed.jpg")
             if os.path.exists(preprocess_path):
                 h = self._compute_phash(preprocess_path)
                 if h is not None:
