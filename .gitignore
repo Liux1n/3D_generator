@@ -8,6 +8,7 @@ src/
 saved_models/
 example_models/
 dataset/
+pix2pix/checkpoints/
 
 # C extensions
 *.so

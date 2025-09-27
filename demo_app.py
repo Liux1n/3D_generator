@@ -14,15 +14,25 @@ import uuid
 import shutil
 from tsr.system import TSR
 from tsr.utils import remove_background, resize_foreground, to_gradio_3d_orientation
-from PIL import Image
+from PIL import Image, ImageOps
 import imagehash
 import argparse
 import shutil
 from tsr.recommender import Recommender
 # import lpips
 from functools import partial
-
-
+from pix2pix.CFGDenoiser import CFGDenoiser
+from omegaconf import OmegaConf
+# from stable_diffusion.ldm.util import instantiate_from_config
+from ldm.util import instantiate_from_config
+import k_diffusion as K
+import random
+import math
+from torch import autocast
+from einops import rearrange
+import einops
+import sys, os
+sys.path.append(os.path.join(os.path.dirname(__file__), "stable_diffusion"))
 
 if torch.cuda.is_available():
     print("CUDA is available. Using GPU.")
@@ -44,9 +54,32 @@ rembg_session = rembg.new_session()
 
 
 
+def load_model_from_config(config, ckpt, vae_ckpt=None, verbose=False):
+    print(f"Loading model from {ckpt}")
+    pl_sd = torch.load(ckpt, map_location="cpu")
+    if "global_step" in pl_sd:
+        print(f"Global Step: {pl_sd['global_step']}")
+    sd = pl_sd["state_dict"]
+    if vae_ckpt is not None:
+        print(f"Loading VAE from {vae_ckpt}")
+        vae_sd = torch.load(vae_ckpt, map_location="cpu")["state_dict"]
+        sd = {
+            k: vae_sd[k[len("first_stage_model.") :]] if k.startswith("first_stage_model.") else v
+            for k, v in sd.items()
+        }
+    model = instantiate_from_config(config.model)
+    m, u = model.load_state_dict(sd, strict=False)
+    if len(m) > 0 and verbose:
+        print("missing keys:")
+        print(m)
+    if len(u) > 0 and verbose:
+        print("unexpected keys:")
+        print(u)
+    return model
+
 
 class TripoSRDemo:
-    def __init__(self, device=None):
+    def __init__(self, args, device=None):
   
         if device is None:
             device = "cuda:0" if torch.cuda.is_available() else "cpu"
@@ -81,7 +114,18 @@ class TripoSRDemo:
         self.save_dir = None
         
         self.recommender = Recommender(dataset_path=self.root_dir)
-    
+        
+        # parser.add_argument("--config", default="pix2pix/configs/generate.yaml", type=str)
+        # parser.add_argument("--ckpt", default="pix2pix/checkpoints/instruct-pix2pix-00-22000.ckpt", type=str)
+        config = OmegaConf.load(args.config)
+        self.pix2pix_model = load_model_from_config(config, args.ckpt, args.vae_ckpt)
+        self.pix2pix_model.eval().cuda()
+        self.pix2pix_model_wrap = K.external.CompVisDenoiser(self.pix2pix_model)
+        self.model_wrap_cfg = CFGDenoiser(self.pix2pix_model_wrap)
+        self.null_token = self.pix2pix_model.get_learned_conditioning([""])
+        
+        
+        
     
     def save_to_dataset(self, input_image, edition_text, preprocessed_image, unique_id, save_dir):
         """
@@ -150,17 +194,23 @@ class TripoSRDemo:
         return score
             
 
-    def preprocess(self, input_image, instruction):
-        print('instruction:', instruction)
-        demo_path = './examples/demo.jpeg'
-        # load demo image
-        demo_image = Image.open(demo_path).convert("RGBA")
-        input_image = demo_image
+    def preprocess(self, input_image, instruction, steps):
+        # print('instruction:', instruction)
+        if not instruction or not instruction.strip():
+            print("⚠️ 未输入提示词，将使用原始图片进行生成！")
+            use_pix2pix = False
+        else:
+            use_pix2pix = True
+        # demo_path = './examples/demo.jpeg'
+        # # load demo image
+        # demo_image = Image.open(demo_path).convert("RGBA")
+        # input_image = demo_image
         
         def fill_background(image):
             image = np.array(image).astype(np.float32) / 255.0
             image = image[:, :, :3] * image[:, :, 3:4] + (1 - image[:, :, 3:4]) * 0.5
             return Image.fromarray((image * 255.0).astype(np.uint8))
+        
         do_remove_background = True
         foreground_ratio = 0.85
         if do_remove_background:
@@ -173,11 +223,57 @@ class TripoSRDemo:
             if image.mode == "RGBA":
                 image = fill_background(image)
         
-        # demo_pic = ....
-        # self.similar_image_paths = self.recommender.recommend_models(image, top_k=self.top_k)
         
-        # self.similar_image_paths = self.recommender.recommend_models_clip(image, top_k=self.top_k)
-        
+        if use_pix2pix:
+            input_image = image
+            randomize_seed = 0
+            seed =0
+            # seed = random.randint(0, 100000) if randomize_seed else seed
+            text_cfg_scale = round(random.uniform(6.0, 9.0), ndigits=2)
+            image_cfg_scale = round(random.uniform(1.2, 1.8), ndigits=2)
+
+            width, height = input_image.size
+            factor = args.resolution / max(width, height)
+            factor = math.ceil(min(width, height) * factor / 64) * 64 / min(width, height)
+            width = int((width * factor) // 64) * 64
+            height = int((height * factor) // 64) * 64
+            input_image = ImageOps.fit(input_image, (width, height), method=Image.Resampling.LANCZOS)
+
+            if instruction == "":
+                return [input_image, seed]
+
+            with torch.no_grad(), autocast("cuda"), self.pix2pix_model.ema_scope():
+                cond = {}
+                cond["c_crossattn"] = [self.pix2pix_model.get_learned_conditioning([instruction])]
+                input_image = 2 * torch.tensor(np.array(input_image)).float() / 255 - 1
+                input_image = rearrange(input_image, "h w c -> 1 c h w").to(self.pix2pix_model.device)
+                cond["c_concat"] = [self.pix2pix_model.encode_first_stage(input_image).mode()]
+
+                uncond = {}
+                uncond["c_crossattn"] = [self.null_token]
+                uncond["c_concat"] = [torch.zeros_like(cond["c_concat"][0])]
+
+                sigmas = self.pix2pix_model_wrap.get_sigmas(int(steps))
+
+                extra_args = {
+                    "cond": cond,
+                    "uncond": uncond,
+                    "text_cfg_scale": text_cfg_scale,
+                    "image_cfg_scale": image_cfg_scale,
+                }
+                torch.manual_seed(seed)
+                z = torch.randn_like(cond["c_concat"][0]) * sigmas[0]
+                z = K.sampling.sample_euler_ancestral(self.model_wrap_cfg, z, sigmas, extra_args=extra_args)
+                x = self.pix2pix_model.decode_first_stage(z)
+                x = torch.clamp((x + 1.0) / 2.0, min=0.0, max=1.0)
+                x = 255.0 * rearrange(x, "1 c h w -> h w c")
+                edited_image = Image.fromarray(x.type(torch.uint8).cpu().numpy())
+            
+            
+            image = edited_image
+        else:
+            pass
+
         # similarities.append((item_id, similarity.item(), model_path))
         self.similarities, self.similar_image_paths = self.recommender.recommend_models_clip(image, top_k=self.top_k)
         # self.candidates = self.recommender.recommend_models_clip(image, top_k=self.top_k)
@@ -324,7 +420,7 @@ class TripoSRDemo:
                     with gr.Row():
                         with gr.Group():
                             # do_remove_background = gr.Checkbox(label="Remove Background", value=True)
-     
+                            self.steps = gr.Number(value=100, precision=0, label="扩散步数", interactive=True)
                             # foreground_ratio = gr.Slider(0.5, 1.0, value=0.85, step=0.05, label="Foreground Ratio")
                             mc_resolution = gr.Slider(32, 320, value=256, step=32, label="3D模型分辨率")
       
@@ -386,7 +482,7 @@ class TripoSRDemo:
             ).success(
                 fn=self.preprocess,
                 # inputs=[input_image, do_remove_background, foreground_ratio],
-                inputs=[input_image, self.instruction],
+                inputs=[input_image, self.instruction, self.steps],
                 outputs=processed_image,
             ).success(
                 fn=self.update_candidates,
@@ -443,9 +539,15 @@ if __name__ == "__main__":
     parser.add_argument("--listen", action="store_true")
     parser.add_argument("--share", action="store_true")
     parser.add_argument("--queuesize", type=int, default=1)
+    ## pix2pix model
+    parser.add_argument("--resolution", default=512, type=int)
+    parser.add_argument("--config", default="pix2pix/configs/generate.yaml", type=str)
+    parser.add_argument("--ckpt", default="pix2pix/checkpoints/instruct-pix2pix-00-22000.ckpt", type=str)
+    parser.add_argument("--vae-ckpt", default=None, type=str)
+    
     args = parser.parse_args()
 
-    demo = TripoSRDemo()
+    demo = TripoSRDemo(args)
     demo.launch(
         username=args.username,
         password=args.password,
