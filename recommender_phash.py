@@ -46,7 +46,7 @@ class PhashRecommender:
             if os.path.exists(model_path):
                 distances.append((item_id, dist, model_path))
 
-        # sort
+        # sort by distance
         distances.sort(key=lambda x: x[1])
 
         return [model_path for _, model_path in distances[:top_k]]
