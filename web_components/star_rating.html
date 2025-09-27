@@ -1,0 +1,98 @@
+<style>
+/* 确保 FontAwesome 正常加载 */
+@import url("https://cdnjs.cloudflare.com/ajax/libs/font-awesome/4.7.0/css/font-awesome.min.css");
+
+.rating {
+  overflow: hidden;
+  display: table;
+  font-size: 32px;
+  color: #FFCA00;
+  font-style: normal;
+  margin-top: 10px;
+}
+.rating-star {
+  padding: 0 5px;
+  margin: 0;
+  cursor: pointer;
+  display: block;
+  float: right;
+}
+.rating-star:after {
+  position: relative;
+  font-family: FontAwesome;
+  content: '\f006'; /* 空心星星 */
+}
+
+/* 状态 1: checked 状态 (实心) - 这是点击后的永久状态 */
+.rating-star.checked ~ .rating-star:after,
+.rating-star.checked:after {
+  content: '\f005' !important; /* **关键：使用 !important 强制覆盖** */
+}
+
+/* 状态 2: Hover 效果 (仅当未设置 checked 状态时才生效) */
+/* 当鼠标悬停在某个星上时，将其和其右侧的星（数值较小）变成实心 */
+.rating-star:hover ~ .rating-star:after,
+.rating-star:hover:after {
+  content: '\f005';
+}
+
+/* 状态 3: 解决问题 - 鼠标移出后，如果已被 checked，必须保持实心 */
+/* 由于状态 1 已经使用了 !important，理论上已经锁定。
+   如果还不行，我们不需要复杂的 :not(.locked) 逻辑，直接依赖 !important 即可。 */
+</style>
+
+
+<div class="rating" id="star-rating">
+  <i class="rating-star" data-rating="5"></i>
+  <i class="rating-star" data-rating="4"></i>
+  <i class="rating-star" data-rating="3"></i>
+  <i class="rating-star" data-rating="2"></i>
+  <i class="rating-star" data-rating="1"></i>
+</div>
+
+<script>
+document.addEventListener("DOMContentLoaded", () => {
+  // Gradio DOM 查找间隔
+  const interval = setInterval(() => {
+    // 尝试获取 Gradio 应用程序的根元素
+    const app = window.gradioApp?.();
+    if (!app) return;
+
+    // 查找评分容器和星
+    const ratingContainer = app.querySelector("#star-rating");
+    const stars = app.querySelectorAll("#star-rating .rating-star");
+    
+    // 查找隐藏的 Textbox。请确保这里的 aria-label 是正确的。
+    const textarea = app.querySelector('textarea[aria-label="评分数值"]');
+    
+    if (!ratingContainer || stars.length === 0 || !textarea) return;
+
+    // 找到了 DOM 就不再重复执行
+    clearInterval(interval); 
+
+    // 初始化事件监听
+    stars.forEach(star => {
+      star.addEventListener("click", () => {
+        const rating = star.getAttribute("data-rating");
+
+        // 清空旧状态
+        stars.forEach(s => s.classList.remove("checked"));
+
+        // 设置新状态：将当前星和其右侧所有星（数值较小）标记为 checked
+        star.classList.add("checked");
+        let prev = star.previousElementSibling;
+        while (prev) {
+          prev.classList.add("checked");
+          prev = prev.previousElementSibling;
+        }
+
+        // 写入隐藏输入框
+        textarea.value = rating;
+        
+        // 触发一个 input 事件，确保 Gradio 能够捕获到值的变化
+        textarea.dispatchEvent(new Event('input', { bubbles: true }));
+      });
+    });
+  }, 200);
+});
+</script>
