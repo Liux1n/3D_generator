@@ -35,8 +35,8 @@ def save_to_dataset(input_image, edition_text, preprocessed_image, model_paths, 
     # 5. save 3D model (obj / glb)
     for path in model_paths:
         if path.endswith(".obj"):
-            shutil.copy(path, os.path.join(save_dir, "model.obj"))
+            shutil.copy(path, os.path.join(save_dir, "3d_model.obj"))
         elif path.endswith(".glb"):
-            shutil.copy(path, os.path.join(save_dir, "model.glb"))
+            shutil.copy(path, os.path.join(save_dir, "3d_model.glb"))
 
     return save_dir
