@@ -39,5 +39,4 @@ def save_to_dataset(input_image, edition_text, preprocessed_image, model_paths, 
         elif path.endswith(".glb"):
             shutil.copy(path, os.path.join(save_dir, "model.glb"))
 
-    print(f"[INFO] All data saved in {save_dir}")
     return save_dir
