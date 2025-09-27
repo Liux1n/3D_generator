@@ -5,6 +5,9 @@ __pycache__/
 
 examples/
 src/
+saved_models/
+example_models/
+dataset/
 
 # C extensions
 *.so
