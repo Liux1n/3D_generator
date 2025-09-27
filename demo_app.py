@@ -18,8 +18,10 @@ from PIL import Image
 import imagehash
 import argparse
 import shutil
-from tsr.recommender_phash import PhashRecommender
+from tsr.recommender import Recommender
 import lpips
+from functools import partial
+
 
 if torch.cuda.is_available():
     print("CUDA is available. Using GPU.")
@@ -40,92 +42,6 @@ model.to(device)
 rembg_session = rembg.new_session()
 
 
-def check_input_image(input_image):
-    if input_image is None:
-        raise gr.Error("No image uploaded!")
-
-
-def preprocess(input_image, do_remove_background, foreground_ratio):
-    def fill_background(image):
-        image = np.array(image).astype(np.float32) / 255.0
-        image = image[:, :, :3] * image[:, :, 3:4] + (1 - image[:, :, 3:4]) * 0.5
-        image = Image.fromarray((image * 255.0).astype(np.uint8))
-        return image
-
-    if do_remove_background:
-        image = input_image.convert("RGB")
-        image = remove_background(image, rembg_session)
-        image = resize_foreground(image, foreground_ratio)
-        image = fill_background(image)
-    else:
-        image = input_image
-        if image.mode == "RGBA":
-            image = fill_background(image)
-    return image
-
-
-def generate(image, mc_resolution, formats=["obj", "glb"]):
-    scene_codes = model(image, device=device)
-    mesh = model.extract_mesh(scene_codes, True, resolution=mc_resolution)[0]
-    mesh = to_gradio_3d_orientation(mesh)
-    rv = []
-    for format in formats:
-        mesh_path = tempfile.NamedTemporaryFile(suffix=f".{format}", delete=False)
-        mesh.export(mesh_path.name)
-        rv.append(mesh_path.name)
-    return rv
-
-def find_most_relative_models(input_image, top_k=3):
-    # This is a placeholder function. Replace with actual implementation.
-    # For demonstration, we return a list of example model paths.
-    candidates_path = "./example_models/"
-    # DEBUG: randomly select top_k models from the directory
-    candidates = glob.glob(os.path.join(candidates_path, "*.obj"))
-    # print("candidates:", candidates)
-    # DEBUG: randomly select top_k models from the directory
-    example_models = candidates[:top_k]
-    return example_models
-
-def generate_example(image, mc_resolution, formats=["obj", "glb"]):
-
-    rv = []
-    example_path_obj = "./examples/burger.obj"
-    example_path_glb = "./examples/burger.glb"
-
-    rv.append(example_path_obj)
-    rv.append(example_path_glb)
-    return rv
-
-
-def generate_obj(image, mc_resolution, formats=["obj", "glb"]):
-    scene_codes = model(image, device=device)
-    mesh = model.extract_mesh(scene_codes, True, resolution=mc_resolution)[0]
-    mesh = to_gradio_3d_orientation(mesh)
-    rv = []
-    # for format in formats:
-    #     print("format:", format)
-    #     mesh_path = tempfile.NamedTemporaryFile(suffix=f".{format}", delete=False)
-    #     mesh.export(mesh_path.name)
-    #     rv.append(mesh_path.name)
-    
-    for format in formats:
-            mesh_path = tempfile.NamedTemporaryFile(suffix=f".{format}", delete=False)
-            mesh.export(mesh_path.name)
-            if format == "obj":
-                rv.append(mesh_path.name)
-    return rv
-
-
-def run_example(image_pil):
-    preprocessed = preprocess(image_pil, False, 0.9)
-    mesh_name_obj, mesh_name_glb = generate(preprocessed, 256, ["obj", "glb"])
-    return preprocessed, mesh_name_obj, mesh_name_glb
-
-
-def run_example_obj(image_pil):
-    preprocessed = preprocess(image_pil, False, 0.9)
-    mesh_name_obj = generate_obj(preprocessed, 256, ["obj"])
-    return preprocessed, mesh_name_obj
 
 
 class TripoSRDemo:
@@ -149,15 +65,16 @@ class TripoSRDemo:
         # ---- rembg 初始化 ----
         self.rembg_session = rembg.new_session()
         
-        
+        self.top_k = 5
         self.similar_image_paths = []
         self.instruction = 'N/A'
-        
+        self.candidate_models = []
+        self.model_buttons = []
         self.curr_obj = None
-        
+        self.num_candidates = 0
         self.root_dir="./dataset"
         
-        self.recommender = PhashRecommender(dataset_path=self.root_dir)
+        self.recommender = Recommender(dataset_path=self.root_dir)
     
     
     def save_to_dataset(self, input_image, edition_text, preprocessed_image):
@@ -241,7 +158,18 @@ class TripoSRDemo:
             if image.mode == "RGBA":
                 image = fill_background(image)
                 
-        self.similar_image_paths = self.recommender.recommend_models(image, top_k=5)
+        # self.similar_image_paths = self.recommender.recommend_models(image, top_k=self.top_k)
+        
+        # self.similar_image_paths = self.recommender.recommend_models_clip(image, top_k=self.top_k)
+        
+        # similarities.append((item_id, similarity.item(), model_path))
+        self.similarities, self.similar_image_paths = self.recommender.recommend_models_clip(image, top_k=self.top_k)
+        # self.candidates = self.recommender.recommend_models_clip(image, top_k=self.top_k)
+        
+        self.num_candidates = len(self.similar_image_paths)
+        
+        
+        
         # distances [('821c88c2', 24, './dataset\\821c88c2\\3d_model.obj'), ('bbf40d91', 28, './dataset\\bbf40d91\\3d_model.obj'), ('21a0c4f8', 32, 
         # './dataset\\21a0c4f8\\3d_model.obj'), ('ffe420bc', 36, './dataset\\ffe420bc\\3d_model.obj')]
         # print('similar_image_paths:', self.similar_image_paths)
@@ -249,43 +177,61 @@ class TripoSRDemo:
         return image
 
 
-    def generate_mesh(self, image, mc_resolution, formats=["obj", "glb"]):
-        scene_codes = self.model(image, device=self.device)
-        mesh = self.model.extract_mesh(scene_codes, True, resolution=mc_resolution)[0]
-        mesh = to_gradio_3d_orientation(mesh)
-
+    def generate_mesh(self, image, mc_resolution):
+        
         paths = []
-        for fmt in formats:
-            mesh_path = tempfile.NamedTemporaryFile(suffix=f".{fmt}", delete=False)
+        
+        if self.similarities[0] >= 0.85:
+            paths.append(self.similar_image_paths[0])
+            self.curr_model_path = self.similar_image_paths[0]
+            paths.append(self.curr_model_path)
+            # return paths
+        else:
+            scene_codes = self.model(image, device=self.device)
+            mesh = self.model.extract_mesh(scene_codes, True, resolution=mc_resolution)[0]
+            mesh = to_gradio_3d_orientation(mesh)
+            mesh_path = tempfile.NamedTemporaryFile(suffix=f".obj", delete=False)
             mesh.export(mesh_path.name)
             paths.append(mesh_path.name)
-            if fmt == "obj":
-                save_dir = "./saved_models/"
-                os.makedirs(save_dir, exist_ok=True)
-                save_path = os.path.join(save_dir, os.path.basename('temp_model.obj'))
-                shutil.copy(mesh_path.name, save_path)  
-                self.curr_model_path = save_path
-                
-                # self.curr_model_path = 
-        paths.append(save_path)
+            save_dir = "./saved_models/"
+            os.makedirs(save_dir, exist_ok=True)
+            save_path = os.path.join(save_dir, os.path.basename('temp_model.obj'))
+                    
+            # shutil.copy(mesh_path.name, save_path)  
+            
+            self.curr_model_path = save_path
+            paths.append(save_path)
+            
+            
+            # for fmt in formats:
+            #     mesh_path = tempfile.NamedTemporaryFile(suffix=f".{fmt}", delete=False)
+            #     mesh.export(mesh_path.name)
+            #     paths.append(mesh_path.name)
+            #     if fmt == "obj":
+            #         save_dir = "./saved_models/"
+            #         os.makedirs(save_dir, exist_ok=True)
+            #         save_path = os.path.join(save_dir, os.path.basename('temp_model.obj'))
+                    
+            #         shutil.copy(mesh_path.name, save_path)  
+            #         self.curr_model_path = save_path
+                    
+            #         # self.curr_model_path = 
+            
+            # paths.append(save_path)
+        # for path in self.similar_image_paths:
+        #     paths.append(path)
+        
         return paths
     
 
   
-    def find_most_relative_models(self):
-        # candidates_path = "./example_models/"
-        # candidates = glob.glob(os.path.join(candidates_path, "*.obj"))
-        
-        return self.similar_image_paths
+    # def update_candidates_button(self):
+    #     return [gr.update(
+            
     
-    def update_curr_model(self):
-        self.curr_model = gr.Model3D(
-                    label="生成模型",
-                    value=self.curr_model_path,
-                    height=150,
-                    interactive=False,
-                )
-        
+    def update_candidates(self):
+        return [gr.update(value=path) for path in self.similar_image_paths]
+            
     def set_main_model(path):
         return path
 
@@ -339,16 +285,12 @@ class TripoSRDemo:
                         with gr.Column():
                             with gr.Tab("OBJ"):
                                 self.output_model_obj = gr.Model3D(label="Output Model (OBJ)", interactive=False, height=300)
-                            with gr.Tab("GLB"):
-                                self.output_model_glb = gr.Model3D(label="Output Model (GLB)", interactive=False, height=300)
-
-          
+            
                             
                             model_buttons = []
 
                         with gr.Column():
-                            # self.curr_model_path = './saved_models/figure.obj'
-                            # print('self.curr_model_path:', self.curr_model_path)
+
                             with gr.Column(elem_id="scrollable-col"):
                                 self.curr_obj = gr.Model3D(
                                     label="生成模型",
@@ -364,45 +306,46 @@ class TripoSRDemo:
                                     inputs=None,
                                     outputs=self.output_model_obj
                                 )
-                                if self.similar_image_paths:
-                                    for i, path in enumerate(self.similar_image_paths):
-                                        gr.Model3D(label=f"候选模型 {i+1}", value=path, height=150, interactive=False)
-                                        btn = gr.Button(f"设为主模型 {i+1}")
-                                        model_buttons.append((btn, path))
-                                        
-                                    gr.HTML("""
-                                                <style>
-                                                #scrollable-col {
-                                                    max-height: 600px;
-                                                    overflow-y: auto;
-                                                    border: 1px solid #eee;
-                                                    padding: 8px;
-                                                }
-                                                </style>
-                                            """)
 
-                    
-                                    for btn, path in model_buttons:
-                                        btn.click(
-                                            fn=lambda p=path: p,
-                                            inputs=None,
-                                            outputs=self.output_model_obj
-                                        )
+                                    
+                                for i in range(self.top_k):
+                                    m = gr.Model3D(
+                                        label=f"候选模型 {i+1}",
+                                        value=None,
+                                        height=150,
+                                        interactive=False
+                                    )
+                                    self.candidate_models.append(m)
+                                    btn_candidate = gr.Button(f"设为主模型 {i+1}")
+                                    self.model_buttons.append((btn_candidate, m))
+        
+                                gr.HTML("""
+                                            <style>
+                                            #scrollable-col {
+                                                max-height: 600px;
+                                                overflow-y: auto;
+                                                border: 1px solid #eee;
+                                                padding: 8px;
+                                            }
+                                            </style>
+                                        """)
+
+                
+                                # for btn, path in self.model_buttons:
+                                #     btn.click(
+                                #         fn=lambda p=path: p,
+                                #         inputs=None,
+                                #         outputs=self.output_model_obj
+                                #     )
                                 
                                 
-                                
-        #     def save_to_dataset(self, input_image, edition_text, preprocessed_image, model_paths, root_dir="dataset"):
-        # """
-        # Saves the input, description, preprocessed image, and generated model to the dataset database.
-        # Parameters:
-        # input_image: PIL.Image (original input image)
-        # edition_text: str (user input description)
-        # preprocessed_image: PIL.Image (preprocessed image)
-        # model_paths: list[str] (model paths (obj, glb))
-        # root_dir: Database root directory
-        # Returns:
-        # save_dir: Path to the saved folder
-        # """
+                                for btn, path in self.model_buttons:
+                                    print('path', path)
+                                    btn.click(
+                                        fn=partial(lambda p: p, path),
+                                        inputs=None,
+                                        outputs=self.output_model_obj
+                                    )
 
             submit.click(
                 fn=lambda img: self._check_input(img),
@@ -412,19 +355,21 @@ class TripoSRDemo:
                 inputs=[input_image, do_remove_background, foreground_ratio],
                 outputs=processed_image,
             ).success(
+                fn=self.update_candidates,
+                inputs=None,
+                outputs=self.candidate_models
+            ).success(
                 fn=self.generate_mesh,
                 inputs=[processed_image, mc_resolution],
-                outputs=[self.output_model_obj, self.output_model_glb, self.curr_obj],
-            ).success(
-                # [MODIFIED] save all data to dataset
-                # fn=lambda processed, obj, glb, inp, edition: self.save_to_dataset(
-                #     inp, edition, processed, [obj, glb]
-                # ),
-                fn=self.save_to_dataset,
-                # save_to_dataset(self, input_image, edition_text, preprocessed_image, model_paths, root_dir="./dataset"):
-                inputs=[input_image, self.instruction, processed_image],
-                outputs=[],
+                outputs=[self.output_model_obj, self.curr_obj],
             )
+            #######DEBUG!!!!!!!!!!!!!!!!!
+            # .success(
+            #     fn=self.save_to_dataset,
+            #     # save_to_dataset(self, input_image, edition_text, preprocessed_image, model_paths, root_dir="./dataset"):
+            #     inputs=[input_image, self.instruction, processed_image],
+            #     outputs=[],
+            # )
 
         return interface
 
