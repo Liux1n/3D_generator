@@ -82,10 +82,13 @@ class Recommender:
                 clip_feature = torch.load(clip_feature_path)
                 self.image_clip_features[item_id] = clip_feature
                 
-    def recommend_models_clip(self, query_image, top_k=10):
+    def recommend_models_clip(self, query_image, top_k=10, dataset_path=None):
         """
         return the top_k most similar 3D model paths based on CLIP features
         """
+        
+        self._load_clip_features()
+        
         query_clip_feature = self._compute_clip_feature(query_image)
         if query_clip_feature is None:
             raise ValueError("Query image could not be processed!")

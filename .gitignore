@@ -9,6 +9,7 @@ saved_models/
 example_models/
 dataset/
 pix2pix/checkpoints/
+dataset_old/
 
 # C extensions
 *.so

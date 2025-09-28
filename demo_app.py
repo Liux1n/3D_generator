@@ -32,6 +32,7 @@ from torch import autocast
 from einops import rearrange
 import einops
 import sys, os
+import clip
 sys.path.append(os.path.join(os.path.dirname(__file__), "stable_diffusion"))
 
 if torch.cuda.is_available():
@@ -111,7 +112,9 @@ class TripoSRDemo:
         self.do_remove_background = True
         self.foreground_ratio = 0.85
         self.mc_resolution = 256
+        self.unique_id = None
         self.save_dir = None
+        self.steps = 100
         
         self.recommender = Recommender(dataset_path=self.root_dir)
         
@@ -124,10 +127,20 @@ class TripoSRDemo:
         self.model_wrap_cfg = CFGDenoiser(self.pix2pix_model_wrap)
         self.null_token = self.pix2pix_model.get_learned_conditioning([""])
         
+        self.clip_model, self.preprocess_clip = clip.load("ViT-B/32", device=self.device)
         
+    def _compute_clip_feature(self, image):
+        """
+        Calculates the CLIP feature of an image and returns a tensor
+        """
+        preprocessed_image = self.preprocess_clip(image).unsqueeze(0).to(self.device)
+        with torch.no_grad():
+            image_features = self.clip_model.encode_image(preprocessed_image)
+            
+        return image_features
         
     
-    def save_to_dataset(self, input_image, edition_text, preprocessed_image, unique_id, save_dir):
+    def save_to_dataset(self, input_image, edition_text, preprocessed_image):
         """
         Saves the input, description, preprocessed image, and generated model to the dataset database.
         Parameters:
@@ -139,10 +152,16 @@ class TripoSRDemo:
         Returns:
         save_dir: Path to the saved folder
         """
-
+        unique_id = self.unique_id
+        save_dir = self.save_dir
         os.makedirs(save_dir, exist_ok=True)
         print(f"Saving data to {save_dir}...")
 
+        
+        if self.similarities[0] >= self.top_match_threshold:
+            print("Found a very similar model in the database. Skipping save.")
+            return self.save_dir
+        
         # 2. save description.txt (including ID and Edition)
         with open(os.path.join(save_dir, "description.txt"), "w", encoding="utf-8") as f:
             f.write(f"ID: {unique_id}\n")
@@ -167,6 +186,8 @@ class TripoSRDemo:
 
         # print('preprocessed_image:', type(preprocessed_image))
         preprocessed_image = Image.fromarray(np.array(preprocessed_image))
+        
+        
         # 4. save preprocess image
         if preprocessed_image is not None:
             if preprocessed_image.mode == "RGBA":
@@ -178,6 +199,10 @@ class TripoSRDemo:
 
         shutil.copy(self.curr_model_path, os.path.join(save_dir, "3d_model.obj"))
         print(f"Saved 3D model to {os.path.join(save_dir, '3d_model.obj')}")
+        
+        # 6. save CLIP feature
+        clip_feature = self._compute_clip_feature(preprocessed_image)
+        torch.save(clip_feature, os.path.join(save_dir, "clip_feature.pt"))
 
 
         return self.save_dir
@@ -298,13 +323,32 @@ class TripoSRDemo:
         self.unique_id = str(uuid.uuid4())[:8]
         self.save_dir = os.path.join(root_dir, self.unique_id)
         self.save_dir = self.save_dir.replace("\\", "/")
-  
-        if self.similarities[0] >= self.top_match_threshold:
-            paths.append(self.similar_image_paths[0])
-            self.curr_model_path = self.similar_image_paths[0]
-            # paths.append(self.curr_model_path)
-            # return paths
-            return self.similar_image_paths[0]
+
+        if len(self.similarities) != 0:
+            if self.similarities[0] >= self.top_match_threshold:
+                paths.append(self.similar_image_paths[0])
+                self.curr_model_path = self.similar_image_paths[0]
+                # paths.append(self.curr_model_path)
+                # return paths
+                # shutil.copy(mesh_path.name, save_path)  
+                
+                return self.similar_image_paths[0]
+            else:
+                scene_codes = self.model(image, device=self.device)
+                mesh = self.model.extract_mesh(scene_codes, True, resolution=mc_resolution)[0]
+                mesh = to_gradio_3d_orientation(mesh)
+                mesh_path = tempfile.NamedTemporaryFile(suffix=f".obj", delete=False)
+                mesh.export(mesh_path.name)
+                paths.append(mesh_path.name)
+                save_dir = "./saved_models/"
+                os.makedirs(save_dir, exist_ok=True)
+                save_path = os.path.join(save_dir, os.path.basename('temp_model.obj'))
+                        
+                shutil.copy(mesh_path.name, save_path)  
+                
+                self.curr_model_path = save_path
+                
+                return mesh_path.name
         else:
             scene_codes = self.model(image, device=self.device)
             mesh = self.model.extract_mesh(scene_codes, True, resolution=mc_resolution)[0]
@@ -316,39 +360,13 @@ class TripoSRDemo:
             os.makedirs(save_dir, exist_ok=True)
             save_path = os.path.join(save_dir, os.path.basename('temp_model.obj'))
                     
-            # shutil.copy(mesh_path.name, save_path)  
+            shutil.copy(mesh_path.name, save_path)  
             
             self.curr_model_path = save_path
-            # paths.append(save_path)
+     
             return mesh_path.name
             
-            
-            # for fmt in formats:
-            #     mesh_path = tempfile.NamedTemporaryFile(suffix=f".{fmt}", delete=False)
-            #     mesh.export(mesh_path.name)
-            #     paths.append(mesh_path.name)
-            #     if fmt == "obj":
-            #         save_dir = "./saved_models/"
-            #         os.makedirs(save_dir, exist_ok=True)
-            #         save_path = os.path.join(save_dir, os.path.basename('temp_model.obj'))
-                    
-            #         shutil.copy(mesh_path.name, save_path)  
-            #         self.curr_model_path = save_path
-                    
-            #         # self.curr_model_path = 
-            
-            # paths.append(save_path)
-        # for path in self.similar_image_paths:
-        #     paths.append(path)
-        
-        # return paths
-    
 
-  
-    # def update_candidates_button(self):
-    #     return [gr.update(
-            
-    
     def update_candidates(self):
 
         # new_candidates = [gr.update(value=path) for path in self.similar_image_paths]
@@ -359,9 +377,9 @@ class TripoSRDemo:
     def set_main_model(path):
         return path
 
-    def get_curr_model_path(self):
-        # print('get_curr_model_path:', self.curr_model_path)
-        return self.curr_model_path
+    # def get_curr_model_path(self):
+    #     # print('get_curr_model_path:', self.curr_model_path)
+    #     return self.curr_model_path
     
     def process_review(self, choice):
         return f"你选择的评分是：{choice}"
@@ -392,8 +410,8 @@ class TripoSRDemo:
         with gr.Blocks(title="3D模型生成") as interface:
             gr.Markdown(
                 """
-                # 3D Generator Demo
-                Single image → 3D mesh reconstruction.
+                # 3D模型生成演示
+                上传一张图像，即可生成 3D 网格模型。你还可以通过输入提示词，引导模型生成具有特定内容或风格的结果。快试试吧！
                 """
             )
 
@@ -411,8 +429,8 @@ class TripoSRDemo:
                             #     outputs=self.instruction,
                             # )
                     with gr.Row():
-                        input_image = gr.Image(label="Input Image", type="pil", image_mode="RGBA")
-                        processed_image = gr.Image(label="Processed Image", interactive=False) # numpy array
+                        input_image = gr.Image(label="原始图像", type="pil", image_mode="RGBA")
+                        processed_image = gr.Image(label="根据描述生成的图像", interactive=False) # numpy array
                         # processed_image = Image.fromarray(processed_image)
                         
                         
@@ -485,20 +503,19 @@ class TripoSRDemo:
                 inputs=[input_image, self.instruction, self.steps],
                 outputs=processed_image,
             ).success(
+                fn=self.generate_mesh,
+                inputs=[processed_image, mc_resolution],
+                outputs=self.output_model_obj,
+            ).success(
                 fn=self.update_candidates,
                 inputs=None,
                 outputs=self.candidate_models
             ).success(
-                fn=self.generate_mesh,
-                inputs=[processed_image, mc_resolution],
-                outputs=self.output_model_obj,
+                fn=self.save_to_dataset,
+                # save_to_dataset(self, input_image, edition_text, preprocessed_image, model_paths, self.unique_id, self.save_dir):
+                inputs=[input_image, self.instruction, processed_image],
+                outputs=[],
             )
-            # .success(
-            #     fn=self.save_to_dataset,
-            #     # save_to_dataset(self, input_image, edition_text, preprocessed_image, model_paths, self.unique_id, self.save_dir):
-            #     inputs=[input_image, self.instruction, processed_image],
-            #     outputs=[],
-            # )
 
         return interface
 
