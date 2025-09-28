@@ -21,6 +21,11 @@ Install other dependencies by
 pip install -r requirements.txt
 ```
 
+### Download a pretrained model for instructionPix2Pix
+```
+bash scripts/download_checkpoints.sh
+```
+
 ### Manual install dlib
 ```
 git clone https://github.com/Murtaza-Saeed/Dlib-Precompiled-Wheels-for-Python-on-Windows-x64-Easy-Installation.git
